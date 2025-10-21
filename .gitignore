@@ -52,6 +52,6 @@ dmypy.json
 # Logs
 *.log
 
-# Claude Code
-.claude/
+# Claude Code (ignore local settings but keep skills)
+.claude/settings.local.json
 CLAUDE.md
