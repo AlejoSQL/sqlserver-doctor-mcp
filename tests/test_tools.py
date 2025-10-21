@@ -6,10 +6,13 @@ from sqlserver_doctor.server import (
     list_databases,
     get_active_sessions,
     get_scheduler_stats,
+    get_server_configurations,
     ServerVersionResponse,
     DatabaseListResponse,
     ActiveSessionsResponse,
     SchedulerStatsResponse,
+    ServerConfigResponse,
+    ConfigSeverity,
 )
 
 
@@ -387,3 +390,180 @@ class TestGetSchedulerStats:
         assert result.total_runnable_tasks == 0
         assert result.cpu_pressure_detected is False
         assert "Access denied" in result.error
+
+
+class TestGetServerConfigurations:
+    """Tests for get_server_configurations tool."""
+
+    @patch("sqlserver_doctor.server.get_connection")
+    def test_get_server_configurations_success(self, mock_get_connection):
+        """Test successful server configurations retrieval."""
+        # Setup mock with all three configurations
+        mock_conn = MagicMock()
+        mock_conn.execute_query.return_value = [
+            {
+                "name": "cost threshold for parallelism",
+                "value": 50,
+                "severity": "OK",
+                "message": "Good starting point [Current: 50]",
+                "recommendation": None,
+            },
+            {
+                "name": "max degree of parallelism",
+                "value": 4,
+                "severity": "OK",
+                "message": "Set to physical CPU count [Current: 4, Physical CPUs: 4]",
+                "recommendation": None,
+            },
+            {
+                "name": "max server memory (MB)",
+                "value": 16384,
+                "severity": "OK",
+                "message": "Configured appropriately [Configured: 16384 MB]",
+                "recommendation": None,
+            },
+        ]
+        mock_get_connection.return_value = mock_conn
+
+        # Execute
+        result = get_server_configurations()
+
+        # Verify
+        assert isinstance(result, ServerConfigResponse)
+        assert result.success is True
+        assert len(result.configurations) == 3
+        assert result.error is None
+
+        # Check that all configs are OK
+        for config in result.configurations:
+            assert config.severity == ConfigSeverity.OK
+            assert config.recommendation is None
+
+    @patch("sqlserver_doctor.server.get_connection")
+    def test_get_server_configurations_with_warnings(self, mock_get_connection):
+        """Test server configurations with warnings and recommendations."""
+        # Setup mock with configurations that need attention
+        mock_conn = MagicMock()
+        mock_conn.execute_query.return_value = [
+            {
+                "name": "cost threshold for parallelism",
+                "value": 5,
+                "severity": "WARNING",
+                "message": "Default value too low for modern servers [Current: 5]",
+                "recommendation": "Recommend setting to 50: EXEC sp_configure 'cost threshold for parallelism', 50; RECONFIGURE;",
+            },
+            {
+                "name": "max degree of parallelism",
+                "value": 0,
+                "severity": "WARNING",
+                "message": "Unlimited parallelism can cause CXPACKET waits [CPUs: 8, Physical: 4]",
+                "recommendation": "Recommend setting to: 4 (physical CPU count, max 8)",
+            },
+            {
+                "name": "max server memory (MB)",
+                "value": 2147483647,
+                "severity": "CRITICAL",
+                "message": "Unlimited (default) - should be set! [Server Memory: 32768 MB, Edition: Enterprise Edition]",
+                "recommendation": "Set max memory to: 28672 MB",
+            },
+        ]
+        mock_get_connection.return_value = mock_conn
+
+        # Execute
+        result = get_server_configurations()
+
+        # Verify
+        assert isinstance(result, ServerConfigResponse)
+        assert result.success is True
+        assert len(result.configurations) == 3
+
+        # Check cost threshold
+        cost_threshold = result.configurations[0]
+        assert cost_threshold.name == "cost threshold for parallelism"
+        assert cost_threshold.value == 5
+        assert cost_threshold.severity == ConfigSeverity.WARNING
+        assert "Default value too low" in cost_threshold.message
+        assert cost_threshold.recommendation is not None
+
+        # Check MAXDOP
+        maxdop = result.configurations[1]
+        assert maxdop.name == "max degree of parallelism"
+        assert maxdop.value == 0
+        assert maxdop.severity == ConfigSeverity.WARNING
+        assert "Unlimited parallelism" in maxdop.message
+        assert maxdop.recommendation is not None
+
+        # Check max memory
+        max_memory = result.configurations[2]
+        assert max_memory.name == "max server memory (MB)"
+        assert max_memory.value == 2147483647
+        assert max_memory.severity == ConfigSeverity.CRITICAL
+        assert "Unlimited" in max_memory.message
+        assert max_memory.recommendation is not None
+
+    @patch("sqlserver_doctor.server.get_connection")
+    def test_get_server_configurations_mixed_severities(self, mock_get_connection):
+        """Test server configurations with different severity levels."""
+        # Setup mock with REVIEW and CONSIDER severities
+        mock_conn = MagicMock()
+        mock_conn.execute_query.return_value = [
+            {
+                "name": "cost threshold for parallelism",
+                "value": 20,
+                "severity": "CONSIDER",
+                "message": "Consider increasing to 25-50 to reduce excessive parallelism [Current: 20]",
+                "recommendation": None,
+            },
+            {
+                "name": "max degree of parallelism",
+                "value": 6,
+                "severity": "REVIEW",
+                "message": "Check if optimal for workload [Current: 6, CPUs: 8, Physical: 4]",
+                "recommendation": None,
+            },
+            {
+                "name": "max server memory (MB)",
+                "value": 16384,
+                "severity": "OK",
+                "message": "Configured appropriately [Configured: 16384 MB]",
+                "recommendation": None,
+            },
+        ]
+        mock_get_connection.return_value = mock_conn
+
+        # Execute
+        result = get_server_configurations()
+
+        # Verify different severities
+        assert result.success is True
+        assert result.configurations[0].severity == ConfigSeverity.CONSIDER
+        assert result.configurations[1].severity == ConfigSeverity.REVIEW
+        assert result.configurations[2].severity == ConfigSeverity.OK
+
+    @patch("sqlserver_doctor.server.get_connection")
+    def test_get_server_configurations_error(self, mock_get_connection):
+        """Test server configurations with database error."""
+        mock_conn = MagicMock()
+        mock_conn.execute_query.side_effect = Exception("Insufficient permissions")
+        mock_get_connection.return_value = mock_conn
+
+        result = get_server_configurations()
+
+        assert isinstance(result, ServerConfigResponse)
+        assert result.success is False
+        assert len(result.configurations) == 0
+        assert "Insufficient permissions" in result.error
+
+    @patch("sqlserver_doctor.server.get_connection")
+    def test_get_server_configurations_empty_results(self, mock_get_connection):
+        """Test server configurations with empty results."""
+        mock_conn = MagicMock()
+        mock_conn.execute_query.return_value = []
+        mock_get_connection.return_value = mock_conn
+
+        result = get_server_configurations()
+
+        assert isinstance(result, ServerConfigResponse)
+        assert result.success is True
+        assert len(result.configurations) == 0
+        assert result.error is None

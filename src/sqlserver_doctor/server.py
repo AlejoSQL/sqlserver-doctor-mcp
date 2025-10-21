@@ -1,5 +1,6 @@
 """SQL Server Doctor MCP Server - Main server implementation."""
 
+from enum import Enum
 from typing import Any
 from mcp.server.fastmcp import FastMCP
 from pydantic import BaseModel, Field
@@ -103,6 +104,34 @@ class SchedulerStatsResponse(BaseModel):
         description="Whether CPU pressure is detected (runnable tasks > 0)"
     )
     interpretation: str = Field(description="Interpretation guide for the results")
+    success: bool = Field(description="Whether the query was successful")
+    error: str | None = Field(None, description="Error message if query failed")
+
+
+class ConfigSeverity(str, Enum):
+    """Severity levels for configuration items."""
+
+    OK = "OK"
+    WARNING = "WARNING"
+    CRITICAL = "CRITICAL"
+    REVIEW = "REVIEW"
+    CONSIDER = "CONSIDER"
+
+
+class ConfigItem(BaseModel):
+    """Information about a single server configuration item."""
+
+    name: str = Field(description="Configuration name")
+    value: int | str = Field(description="Current configured value")
+    severity: ConfigSeverity = Field(description="Severity level of the configuration status")
+    message: str = Field(description="Human-readable status message with context")
+    recommendation: str | None = Field(None, description="Recommended action to take, if any")
+
+
+class ServerConfigResponse(BaseModel):
+    """Response model for server configuration diagnostics."""
+
+    configurations: list[ConfigItem] = Field(description="List of configuration items")
     success: bool = Field(description="Whether the query was successful")
     error: str | None = Field(None, description="Error message if query failed")
 
@@ -353,6 +382,182 @@ def get_scheduler_stats() -> SchedulerStatsResponse:
             avg_runnable_per_scheduler=0.0,
             cpu_pressure_detected=False,
             interpretation="",
+            success=False,
+            error=str(e),
+        )
+
+
+@mcp.tool()
+def get_server_configurations() -> ServerConfigResponse:
+    """
+    Get SQL Server configuration diagnostics and recommendations.
+
+    Returns configuration analysis for key SQL Server settings including:
+    - Max Server Memory: Memory allocation limits and edition compliance
+    - Cost Threshold for Parallelism: Parallel query execution threshold
+    - Max Degree of Parallelism (MAXDOP): Maximum parallel query threads
+
+    Each configuration includes current value, severity assessment (OK, WARNING,
+    CRITICAL, REVIEW, CONSIDER), contextual message, and actionable recommendations.
+    """
+    logger.info("Tool called: get_server_configurations")
+    try:
+        conn = get_connection()
+        results = conn.execute_query(
+            """
+            -- Max Server Memory Configuration
+            SELECT
+                CONVERT(VARCHAR(100), c.name) as name,
+                CAST(c.value_in_use AS INT) as value,
+                CONVERT(VARCHAR(20),
+                    CASE
+                        WHEN c.value_in_use = 2147483647 THEN 'CRITICAL'
+                        WHEN CAST(SERVERPROPERTY('EngineEdition') AS INT) = 2 AND c.value_in_use > 131072 THEN 'CRITICAL'
+                        WHEN c.value_in_use > (i.physical_memory_kb / 1024 * 0.9) THEN 'WARNING'
+                        WHEN c.value_in_use < (i.physical_memory_kb / 1024 * 0.5)
+                            AND c.value_in_use < (CASE WHEN CAST(SERVERPROPERTY('EngineEdition') AS INT) = 2 THEN 131072 ELSE 999999999 END)
+                            THEN 'WARNING'
+                        ELSE 'OK'
+                    END
+                ) as severity,
+                CONVERT(VARCHAR(1000),
+                    CASE
+                        WHEN c.value_in_use = 2147483647 THEN
+                            'Unlimited (default) - should be set! [Server Memory: ' + CAST(i.physical_memory_kb / 1024 AS VARCHAR) + ' MB, Edition: ' + CAST(SERVERPROPERTY('Edition') AS VARCHAR) + ']'
+                        WHEN CAST(SERVERPROPERTY('EngineEdition') AS INT) = 2 AND c.value_in_use > 131072
+                            THEN 'Exceeds Standard Edition 128 GB limit! [Configured: ' + CAST(c.value_in_use AS VARCHAR) + ' MB, Limit: 131072 MB]'
+                        WHEN CAST(SERVERPROPERTY('EngineEdition') AS INT) = 2 AND c.value_in_use >= 131072
+                            THEN 'At Standard Edition limit [Configured: ' + CAST(c.value_in_use AS VARCHAR) + ' MB]'
+                        WHEN c.value_in_use > (i.physical_memory_kb / 1024 * 0.9)
+                            THEN 'Too high - leave memory for OS [Configured: ' + CAST(c.value_in_use AS VARCHAR) + ' MB, Server Total: ' + CAST(i.physical_memory_kb / 1024 AS VARCHAR) + ' MB]'
+                        WHEN c.value_in_use < (i.physical_memory_kb / 1024 * 0.5)
+                            AND c.value_in_use < (CASE WHEN CAST(SERVERPROPERTY('EngineEdition') AS INT) = 2 THEN 131072 ELSE 999999999 END)
+                            THEN 'Too low - SQL Server artificially limited [Configured: ' + CAST(c.value_in_use AS VARCHAR) + ' MB, Server Total: ' + CAST(i.physical_memory_kb / 1024 AS VARCHAR) + ' MB]'
+                        ELSE 'Configured appropriately [Configured: ' + CAST(c.value_in_use AS VARCHAR) + ' MB]'
+                    END
+                ) as message,
+                CONVERT(VARCHAR(1000),
+                    CASE
+                        WHEN c.value_in_use = 2147483647 THEN
+                            CASE
+                                WHEN CAST(SERVERPROPERTY('EngineEdition') AS INT) = 2 THEN
+                                    'Set max memory to: ' + CAST(
+                                        CASE WHEN 131072 < (i.physical_memory_kb / 1024) - 4096
+                                             THEN 131072
+                                             ELSE (i.physical_memory_kb / 1024) - 4096
+                                        END AS VARCHAR) + ' MB (Standard Edition 128 GB limit)'
+                                ELSE
+                                    'Set max memory to: ' + CAST((i.physical_memory_kb / 1024) - 4096 AS VARCHAR) + ' MB'
+                            END
+                        WHEN CAST(SERVERPROPERTY('EngineEdition') AS INT) = 2 AND c.value_in_use > 131072 THEN
+                            'Reduce to 131072 MB (128 GB - Standard Edition limit)'
+                        ELSE NULL
+                    END
+                ) as recommendation
+            FROM sys.configurations c
+            CROSS JOIN sys.dm_os_sys_info i
+            WHERE c.name = 'max server memory (MB)'
+
+            UNION ALL
+
+            -- Cost Threshold for Parallelism
+            SELECT
+                CONVERT(VARCHAR(100), name) as name,
+                CAST(value_in_use AS INT) as value,
+                CONVERT(VARCHAR(20),
+                    CASE
+                        WHEN value_in_use = 5 THEN 'WARNING'
+                        WHEN value_in_use < 25 THEN 'CONSIDER'
+                        WHEN value_in_use >= 25 AND value_in_use <= 50 THEN 'OK'
+                        ELSE 'OK'
+                    END
+                ) as severity,
+                CONVERT(VARCHAR(1000),
+                    CASE
+                        WHEN value_in_use = 5 THEN 'Default value too low for modern servers [Current: ' + CAST(value_in_use AS VARCHAR) + ']'
+                        WHEN value_in_use < 25 THEN 'Consider increasing to 25-50 to reduce excessive parallelism [Current: ' + CAST(value_in_use AS VARCHAR) + ']'
+                        WHEN value_in_use >= 25 AND value_in_use <= 50 THEN 'Good starting point [Current: ' + CAST(value_in_use AS VARCHAR) + ']'
+                        ELSE 'Custom tuned [Current: ' + CAST(value_in_use AS VARCHAR) + ']'
+                    END
+                ) as message,
+                CONVERT(VARCHAR(1000),
+                    CASE
+                        WHEN value_in_use = 5 THEN 'Recommend setting to 50: EXEC sp_configure ''cost threshold for parallelism'', 50; RECONFIGURE;'
+                        ELSE NULL
+                    END
+                ) as recommendation
+            FROM sys.configurations
+            WHERE name = 'cost threshold for parallelism'
+
+            UNION ALL
+
+            -- Max Degree of Parallelism
+            SELECT
+                CONVERT(VARCHAR(100), c.name) as name,
+                CAST(c.value_in_use AS INT) as value,
+                CONVERT(VARCHAR(20),
+                    CASE
+                        WHEN c.value_in_use = 0 THEN 'WARNING'
+                        WHEN c.value_in_use = 1 THEN 'WARNING'
+                        WHEN c.value_in_use > 8 THEN 'CONSIDER'
+                        WHEN c.value_in_use = (i.cpu_count / i.hyperthread_ratio) AND (i.cpu_count / i.hyperthread_ratio) <= 8
+                            THEN 'OK'
+                        ELSE 'REVIEW'
+                    END
+                ) as severity,
+                CONVERT(VARCHAR(1000),
+                    CASE
+                        WHEN c.value_in_use = 0 THEN 'Unlimited parallelism can cause CXPACKET waits [CPUs: ' + CAST(i.cpu_count AS VARCHAR) + ', Physical: ' + CAST(i.cpu_count / i.hyperthread_ratio AS VARCHAR) + ']'
+                        WHEN c.value_in_use = 1 THEN 'Parallelism disabled - multi-core not utilized [CPUs: ' + CAST(i.cpu_count AS VARCHAR) + ']'
+                        WHEN c.value_in_use > 8 THEN 'Values > 8 rarely help, often hurt [Current: ' + CAST(c.value_in_use AS VARCHAR) + ', CPUs: ' + CAST(i.cpu_count AS VARCHAR) + ']'
+                        WHEN c.value_in_use = (i.cpu_count / i.hyperthread_ratio) AND (i.cpu_count / i.hyperthread_ratio) <= 8
+                            THEN 'Set to physical CPU count [Current: ' + CAST(c.value_in_use AS VARCHAR) + ', Physical CPUs: ' + CAST(i.cpu_count / i.hyperthread_ratio AS VARCHAR) + ']'
+                        ELSE 'Check if optimal for workload [Current: ' + CAST(c.value_in_use AS VARCHAR) + ', CPUs: ' + CAST(i.cpu_count AS VARCHAR) + ', Physical: ' + CAST(i.cpu_count / i.hyperthread_ratio AS VARCHAR) + ']'
+                    END
+                ) as message,
+                CONVERT(VARCHAR(1000),
+                    CASE
+                        WHEN c.value_in_use = 0 THEN
+                            'Recommend setting to: ' + CAST(
+                                CASE
+                                    WHEN (i.cpu_count / i.hyperthread_ratio) <= 8
+                                    THEN (i.cpu_count / i.hyperthread_ratio)
+                                    ELSE 8
+                                END AS VARCHAR
+                            ) + ' (physical CPU count, max 8)'
+                        ELSE NULL
+                    END
+                ) as recommendation
+            FROM sys.configurations c
+            CROSS JOIN sys.dm_os_sys_info i
+            WHERE c.name = 'max degree of parallelism'
+
+            ORDER BY name
+            """
+        )
+
+        configurations = [
+            ConfigItem(
+                name=row["name"],
+                value=row["value"],
+                severity=ConfigSeverity(row["severity"]),
+                message=row["message"],
+                recommendation=row["recommendation"],
+            )
+            for row in results
+        ]
+
+        logger.info(f"Successfully retrieved {len(configurations)} configuration(s)")
+
+        return ServerConfigResponse(
+            configurations=configurations,
+            success=True,
+        )
+
+    except Exception as e:
+        logger.error(f"Error getting server configurations: {str(e)}")
+        return ServerConfigResponse(
+            configurations=[],
             success=False,
             error=str(e),
         )

@@ -6,11 +6,17 @@ A Model Context Protocol (MCP) server for SQL Server tuning, diagnostics, and pe
 
 Ask your LLM client questions to troubleshoot and diagnose SQL Server issues:
 
+**Configuration checks:**
+- "Check my SQL Server configuration"
+- "Is my SQL Server properly configured?"
+- "Verify server settings"
+
 **General troubleshooting:**
 - "Users are complaining about slow queries, what's happening?"
 - "Is something blocking my database?"
 
-**Specific diagnostics:**
+**Workload analysis:**
+- "Analyze current SQL Server workload"
 - "What queries are currently running?"
 - "Which query is using the most CPU?"
 - "Is there CPU pressure on the server?"
@@ -21,6 +27,7 @@ Ask your LLM client questions to troubleshoot and diagnose SQL Server issues:
 Currently implemented tools:
 - **get_server_version** - Get SQL Server version and instance information
 - **list_databases** - List all databases with state, recovery model, and compatibility level
+- **get_server_configurations** - Analyze critical server configurations (max memory, MAXDOP, cost threshold) with recommendations
 - **get_active_sessions** - Monitor currently executing queries with CPU usage, wait stats, and blocking information
 - **get_scheduler_stats** - Monitor CPU queue depth and detect CPU pressure with automatic interpretation
 
@@ -111,6 +118,13 @@ Once connected, Claude can use these tools:
 
 - **get_server_version()** - Returns SQL Server version and instance name
 - **list_databases()** - Returns list of all databases with metadata (name, state, recovery model, compatibility level)
+- **get_server_configurations()** - Returns configuration diagnostics and recommendations:
+  - Max Server Memory analysis (with edition limits)
+  - Cost Threshold for Parallelism evaluation
+  - Max Degree of Parallelism (MAXDOP) assessment
+  - Severity levels (OK, WARNING, CRITICAL, REVIEW, CONSIDER)
+  - Context-rich messages with server specifications
+  - Actionable SQL recommendations
 - **get_active_sessions()** - Returns currently executing queries with detailed performance metrics:
   - SQL query text
   - Session ID, status, and command type
@@ -126,10 +140,72 @@ Once connected, Claude can use these tools:
   - CPU pressure detection (tasks waiting for CPU)
   - Automatic interpretation of results
 
+## Diagnostic Skills
+
+This repository includes two diagnostic skills that provide intelligent workflows for using the MCP tools:
+
+### 1. SQL Server Configuration Check (`sql-server-config-check`)
+
+Verifies SQL Server configuration health by checking version and critical settings.
+
+**Triggers on questions like:**
+- "Check my SQL Server configuration"
+- "Is my SQL Server properly configured?"
+- "Verify server settings"
+
+**What it does:**
+1. Gets SQL Server version and edition
+2. Analyzes max memory, MAXDOP, and cost threshold settings
+3. Categorizes issues by severity (CRITICAL → WARNING → REVIEW → OK)
+4. Provides prioritized, actionable recommendations
+
+### 2. SQL Server Workload Analysis (`sql-server-workload-analysis`)
+
+Analyzes current workload and resource pressure to identify performance bottlenecks.
+
+**Triggers on questions like:**
+- "Analyze SQL Server workload"
+- "What's causing slow performance?"
+- "Find blocking queries"
+- "Is there CPU pressure?"
+
+**What it does:**
+1. Analyzes active sessions (blocking, long-running queries, resource consumption)
+2. Checks CPU and I/O pressure via scheduler stats
+3. Correlates findings (e.g., high CPU with specific sessions)
+4. Explains wait types in plain language
+5. Provides immediate actions, investigation steps, and preventive measures
+
+### Using the Skills
+
+**Option 1: Project-Local (Recommended)**
+
+The skills in `.claude/skills/` work automatically when you're working in this project directory. No additional setup needed!
+
+**Option 2: Global Installation**
+
+To use these skills across all projects, copy them to your global Claude skills directory:
+
+**macOS/Linux:**
+```bash
+cp .claude/skills/*.md ~/.config/claude/skills/
+```
+
+**Windows:**
+```powershell
+Copy-Item .claude\skills\*.md "$env:APPDATA\Claude\skills\"
+```
+
+Once installed (either way), Claude will automatically use these skills when you ask matching questions!
+
 ## Project Structure
 
 ```
 sqlserver-doctor-mcp/
+├── .claude/
+│   └── skills/
+│       ├── sql-server-config-check.md      # Configuration health check skill
+│       └── sql-server-workload-analysis.md # Workload analysis skill
 ├── src/
 │   └── sqlserver_doctor/
 │       ├── __init__.py
@@ -147,11 +223,15 @@ sqlserver-doctor-mcp/
 
 ## Roadmap
 
-Future tools to be added:
-- Wait statistics analysis
-- Database health checks
+Future enhancements:
+- Additional configuration checks (tempdb, database settings)
+- Wait statistics analysis and trending
+- Index fragmentation detection
+- Query plan analysis
+- Database health checks (file growth, backup status)
 - Performance counter monitoring
-- Blocking and deadlock detection
+- Deadlock detection and analysis
+- Additional diagnostic skills for specialized scenarios
 
 ## License
 
