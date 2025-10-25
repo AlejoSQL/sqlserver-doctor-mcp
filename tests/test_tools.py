@@ -7,11 +7,13 @@ from sqlserver_doctor.server import (
     get_active_sessions,
     get_scheduler_stats,
     get_server_configurations,
+    get_memory_stats,
     ServerVersionResponse,
     DatabaseListResponse,
     ActiveSessionsResponse,
     SchedulerStatsResponse,
     ServerConfigResponse,
+    MemoryStatsResponse,
     ConfigSeverity,
 )
 
@@ -277,37 +279,14 @@ class TestGetSchedulerStats:
     @patch("sqlserver_doctor.server.get_connection")
     def test_get_scheduler_stats_no_pressure(self, mock_get_connection):
         """Test scheduler stats with no CPU pressure."""
-        # Setup mock - 4 CPU cores, no runnable tasks
+        # Setup mock - 4 CPU cores, no runnable tasks (aggregated format)
         mock_conn = MagicMock()
         mock_conn.execute_query.return_value = [
             {
-                "scheduler_id": 0,
-                "current_tasks_count": 5,
-                "runnable_tasks_count": 0,
-                "work_queue_count": 0,
-                "pending_disk_io_count": 0,
-            },
-            {
-                "scheduler_id": 1,
-                "current_tasks_count": 3,
-                "runnable_tasks_count": 0,
-                "work_queue_count": 0,
-                "pending_disk_io_count": 0,
-            },
-            {
-                "scheduler_id": 2,
-                "current_tasks_count": 4,
-                "runnable_tasks_count": 0,
-                "work_queue_count": 0,
-                "pending_disk_io_count": 0,
-            },
-            {
-                "scheduler_id": 3,
-                "current_tasks_count": 2,
-                "runnable_tasks_count": 0,
-                "work_queue_count": 0,
-                "pending_disk_io_count": 0,
-            },
+                "scheduler_count": 4,
+                "avg_runnable_tasks": 0.0,
+                "avg_pending_disk_io_count": 0.0,
+            }
         ]
         mock_get_connection.return_value = mock_conn
 
@@ -327,37 +306,15 @@ class TestGetSchedulerStats:
     @patch("sqlserver_doctor.server.get_connection")
     def test_get_scheduler_stats_with_pressure(self, mock_get_connection):
         """Test scheduler stats with CPU pressure detected."""
-        # Setup mock - CPU pressure on scheduler 1 and 2
+        # Setup mock - CPU pressure (aggregated format)
+        # avg_runnable = (0 + 2 + 3 + 0) / 4 = 1.25
         mock_conn = MagicMock()
         mock_conn.execute_query.return_value = [
             {
-                "scheduler_id": 0,
-                "current_tasks_count": 8,
-                "runnable_tasks_count": 0,
-                "work_queue_count": 0,
-                "pending_disk_io_count": 0,
-            },
-            {
-                "scheduler_id": 1,
-                "current_tasks_count": 10,
-                "runnable_tasks_count": 2,
-                "work_queue_count": 5,
-                "pending_disk_io_count": 1,
-            },
-            {
-                "scheduler_id": 2,
-                "current_tasks_count": 9,
-                "runnable_tasks_count": 3,
-                "work_queue_count": 2,
-                "pending_disk_io_count": 0,
-            },
-            {
-                "scheduler_id": 3,
-                "current_tasks_count": 6,
-                "runnable_tasks_count": 0,
-                "work_queue_count": 0,
-                "pending_disk_io_count": 0,
-            },
+                "scheduler_count": 4,
+                "avg_runnable_tasks": 1.25,
+                "avg_pending_disk_io_count": 0.25,
+            }
         ]
         mock_get_connection.return_value = mock_conn
 
@@ -368,11 +325,10 @@ class TestGetSchedulerStats:
         assert isinstance(result, SchedulerStatsResponse)
         assert result.success is True
         assert result.scheduler_count == 4
-        assert result.total_runnable_tasks == 5  # 0 + 2 + 3 + 0
-        assert result.avg_runnable_per_scheduler == 1.25  # 5 / 4
+        assert result.total_runnable_tasks == 5  # 1.25 * 4 = 5
+        assert result.avg_runnable_per_scheduler == 1.25
         assert result.cpu_pressure_detected is True
-        assert "CPU PRESSURE DETECTED" in result.interpretation
-        assert "5 task(s) waiting for CPU" in result.interpretation
+        assert "MILD CPU PRESSURE" in result.interpretation
         assert result.error is None
 
     @patch("sqlserver_doctor.server.get_connection")
@@ -567,3 +523,225 @@ class TestGetServerConfigurations:
         assert result.success is True
         assert len(result.configurations) == 0
         assert result.error is None
+
+
+class TestGetMemoryStats:
+    """Tests for get_memory_stats tool."""
+
+    @patch("sqlserver_doctor.server.get_connection")
+    def test_get_memory_stats_healthy(self, mock_get_connection):
+        """Test memory stats with healthy memory."""
+        # Setup mock - healthy memory state
+        mock_conn = MagicMock()
+        mock_conn.execute_query.return_value = [
+            {
+                "server_name": "TESTSERVER",
+                "check_timestamp": "2025-10-25 14:30:00",
+                "ple_seconds": 5000,
+                "ple_minutes": 83,
+                "ple_status": "OK",
+                "memory_grants_pending": 0,
+                "grants_status": "OK",
+                "target_memory_mb": 16384,
+                "total_memory_mb": 16384,
+                "memory_difference_mb": 0,
+                "memory_pressure_status": "OK",
+                "max_server_memory_mb": 16384,
+                "buffer_pool_committed_mb": 15000,
+                "buffer_pool_target_mb": 16000,
+                "overall_assessment": "OK: Memory appears healthy",
+            }
+        ]
+        mock_get_connection.return_value = mock_conn
+
+        # Execute
+        result = get_memory_stats()
+
+        # Verify
+        assert isinstance(result, MemoryStatsResponse)
+        assert result.success is True
+        assert result.error is None
+        assert result.memory_stats is not None
+
+        stats = result.memory_stats
+        assert stats.server_name == "TESTSERVER"
+        assert stats.ple_seconds == 5000
+        assert stats.ple_status == "OK"
+        assert stats.memory_grants_pending == 0
+        assert stats.grants_status == "OK"
+        assert stats.memory_pressure_status == "OK"
+        assert "healthy" in stats.overall_assessment
+
+    @patch("sqlserver_doctor.server.get_connection")
+    def test_get_memory_stats_low_ple(self, mock_get_connection):
+        """Test memory stats with low Page Life Expectancy."""
+        # Setup mock - low PLE warning
+        mock_conn = MagicMock()
+        mock_conn.execute_query.return_value = [
+            {
+                "server_name": "TESTSERVER",
+                "check_timestamp": "2025-10-25 14:30:00",
+                "ple_seconds": 250,
+                "ple_minutes": 4,
+                "ple_status": "CRITICAL",
+                "memory_grants_pending": 0,
+                "grants_status": "OK",
+                "target_memory_mb": 16384,
+                "total_memory_mb": 16384,
+                "memory_difference_mb": 0,
+                "memory_pressure_status": "OK",
+                "max_server_memory_mb": 16384,
+                "buffer_pool_committed_mb": 15000,
+                "buffer_pool_target_mb": 16000,
+                "overall_assessment": "WARNING: Low Page Life Expectancy",
+            }
+        ]
+        mock_get_connection.return_value = mock_conn
+
+        # Execute
+        result = get_memory_stats()
+
+        # Verify
+        assert result.success is True
+        stats = result.memory_stats
+        assert stats.ple_seconds == 250
+        assert stats.ple_status == "CRITICAL"
+        assert "Low Page Life Expectancy" in stats.overall_assessment
+
+    @patch("sqlserver_doctor.server.get_connection")
+    def test_get_memory_stats_memory_pressure(self, mock_get_connection):
+        """Test memory stats with memory pressure detected."""
+        # Setup mock - SQL Server wants more memory
+        mock_conn = MagicMock()
+        mock_conn.execute_query.return_value = [
+            {
+                "server_name": "TESTSERVER",
+                "check_timestamp": "2025-10-25 14:30:00",
+                "ple_seconds": 1500,
+                "ple_minutes": 25,
+                "ple_status": "OK",
+                "memory_grants_pending": 0,
+                "grants_status": "OK",
+                "target_memory_mb": 18432,
+                "total_memory_mb": 16384,
+                "memory_difference_mb": 2048,
+                "memory_pressure_status": "UNDER_PRESSURE",
+                "max_server_memory_mb": 16384,
+                "buffer_pool_committed_mb": 15000,
+                "buffer_pool_target_mb": 16000,
+                "overall_assessment": "WARNING: SQL Server wants more memory",
+            }
+        ]
+        mock_get_connection.return_value = mock_conn
+
+        # Execute
+        result = get_memory_stats()
+
+        # Verify
+        assert result.success is True
+        stats = result.memory_stats
+        assert stats.memory_difference_mb == 2048
+        assert stats.memory_pressure_status == "UNDER_PRESSURE"
+        assert "wants more memory" in stats.overall_assessment
+
+    @patch("sqlserver_doctor.server.get_connection")
+    def test_get_memory_stats_grants_pending(self, mock_get_connection):
+        """Test memory stats with memory grants pending (critical)."""
+        # Setup mock - queries waiting for memory
+        mock_conn = MagicMock()
+        mock_conn.execute_query.return_value = [
+            {
+                "server_name": "TESTSERVER",
+                "check_timestamp": "2025-10-25 14:30:00",
+                "ple_seconds": 800,
+                "ple_minutes": 13,
+                "ple_status": "WARNING",
+                "memory_grants_pending": 3,
+                "grants_status": "CRITICAL",
+                "target_memory_mb": 16384,
+                "total_memory_mb": 16384,
+                "memory_difference_mb": 0,
+                "memory_pressure_status": "OK",
+                "max_server_memory_mb": 16384,
+                "buffer_pool_committed_mb": 15000,
+                "buffer_pool_target_mb": 16000,
+                "overall_assessment": "CRITICAL: Queries waiting for memory!",
+            }
+        ]
+        mock_get_connection.return_value = mock_conn
+
+        # Execute
+        result = get_memory_stats()
+
+        # Verify
+        assert result.success is True
+        stats = result.memory_stats
+        assert stats.memory_grants_pending == 3
+        assert stats.grants_status == "CRITICAL"
+        assert "CRITICAL" in stats.overall_assessment
+        assert "waiting for memory" in stats.overall_assessment
+
+    @patch("sqlserver_doctor.server.get_connection")
+    def test_get_memory_stats_critical_combined(self, mock_get_connection):
+        """Test memory stats with both low PLE and memory pressure."""
+        # Setup mock - critical state with multiple issues
+        mock_conn = MagicMock()
+        mock_conn.execute_query.return_value = [
+            {
+                "server_name": "TESTSERVER",
+                "check_timestamp": "2025-10-25 14:30:00",
+                "ple_seconds": 200,
+                "ple_minutes": 3,
+                "ple_status": "CRITICAL",
+                "memory_grants_pending": 0,
+                "grants_status": "OK",
+                "target_memory_mb": 18432,
+                "total_memory_mb": 16384,
+                "memory_difference_mb": 2048,
+                "memory_pressure_status": "UNDER_PRESSURE",
+                "max_server_memory_mb": 16384,
+                "buffer_pool_committed_mb": 15000,
+                "buffer_pool_target_mb": 16000,
+                "overall_assessment": "CRITICAL: Low PLE and memory pressure detected",
+            }
+        ]
+        mock_get_connection.return_value = mock_conn
+
+        # Execute
+        result = get_memory_stats()
+
+        # Verify
+        assert result.success is True
+        stats = result.memory_stats
+        assert stats.ple_status == "CRITICAL"
+        assert stats.memory_pressure_status == "UNDER_PRESSURE"
+        assert "CRITICAL" in stats.overall_assessment
+        assert "Low PLE and memory pressure" in stats.overall_assessment
+
+    @patch("sqlserver_doctor.server.get_connection")
+    def test_get_memory_stats_no_results(self, mock_get_connection):
+        """Test memory stats with no results returned."""
+        mock_conn = MagicMock()
+        mock_conn.execute_query.return_value = []
+        mock_get_connection.return_value = mock_conn
+
+        result = get_memory_stats()
+
+        assert isinstance(result, MemoryStatsResponse)
+        assert result.success is False
+        assert result.memory_stats is None
+        assert "No results returned" in result.error
+
+    @patch("sqlserver_doctor.server.get_connection")
+    def test_get_memory_stats_error(self, mock_get_connection):
+        """Test memory stats with database error."""
+        mock_conn = MagicMock()
+        mock_conn.execute_query.side_effect = Exception("Insufficient permissions")
+        mock_get_connection.return_value = mock_conn
+
+        result = get_memory_stats()
+
+        assert isinstance(result, MemoryStatsResponse)
+        assert result.success is False
+        assert result.memory_stats is None
+        assert "Insufficient permissions" in result.error

@@ -136,6 +136,34 @@ class ServerConfigResponse(BaseModel):
     error: str | None = Field(None, description="Error message if query failed")
 
 
+class MemoryStats(BaseModel):
+    """Memory statistics and diagnostics for SQL Server."""
+
+    server_name: str = Field(description="SQL Server instance name")
+    check_timestamp: str = Field(description="Timestamp when check was performed")
+    ple_seconds: int = Field(description="Page Life Expectancy in seconds")
+    ple_minutes: int = Field(description="Page Life Expectancy in minutes")
+    ple_status: str = Field(description="PLE status: OK, WARNING, or CRITICAL")
+    memory_grants_pending: int = Field(description="Number of queries waiting for memory grants")
+    grants_status: str = Field(description="Memory grants status: OK or CRITICAL")
+    target_memory_mb: int = Field(description="Target server memory in MB")
+    total_memory_mb: int = Field(description="Total server memory currently allocated in MB")
+    memory_difference_mb: int = Field(description="Difference between target and total memory (MB)")
+    memory_pressure_status: str = Field(description="Memory pressure status: OK, WATCH, or UNDER_PRESSURE")
+    max_server_memory_mb: int = Field(description="Max server memory configuration setting (MB)")
+    buffer_pool_committed_mb: int = Field(description="Buffer pool committed memory (MB)")
+    buffer_pool_target_mb: int = Field(description="Buffer pool target memory (MB)")
+    overall_assessment: str = Field(description="Overall memory health assessment with recommendations")
+
+
+class MemoryStatsResponse(BaseModel):
+    """Response model for memory statistics."""
+
+    memory_stats: MemoryStats | None = Field(None, description="Memory statistics and diagnostics")
+    success: bool = Field(description="Whether the query was successful")
+    error: str | None = Field(None, description="Error message if query failed")
+
+
 # Tools
 @mcp.tool()
 def get_server_version() -> ServerVersionResponse:
@@ -558,6 +586,118 @@ def get_server_configurations() -> ServerConfigResponse:
         logger.error(f"Error getting server configurations: {str(e)}")
         return ServerConfigResponse(
             configurations=[],
+            success=False,
+            error=str(e),
+        )
+
+
+@mcp.tool()
+def get_memory_stats() -> MemoryStatsResponse:
+    """
+    Get SQL Server memory statistics to identify memory pressure issues.
+
+    Returns comprehensive memory diagnostics including:
+    - Page Life Expectancy (PLE): How long pages stay in buffer pool
+      * <300 seconds: CRITICAL - severe memory pressure
+      * <1000 seconds: WARNING - moderate memory pressure
+      * >=1000 seconds: OK - healthy memory
+    - Memory Grants Pending: Queries waiting for memory allocation (any > 0 is CRITICAL)
+    - Memory Pressure: Gap between target and actual memory allocation
+    - Buffer Pool: Committed and target memory usage
+    - Overall Assessment: Aggregated health status with actionable recommendations
+
+    This tool is essential for diagnosing if SQL Server needs more memory or if there
+    are memory configuration issues.
+    """
+    logger.info("Tool called: get_memory_stats")
+    try:
+        conn = get_connection()
+        results = conn.execute_query(
+            """
+            WITH memory_metrics AS (
+                SELECT
+                    MAX(CASE WHEN counter_name = 'Page life expectancy' AND object_name LIKE '%Buffer Node%'
+                        THEN cntr_value END) AS ple_seconds,
+                    MAX(CASE WHEN counter_name = 'Memory Grants Pending' AND object_name LIKE '%Memory Manager%'
+                        THEN cntr_value END) AS grants_pending,
+                    MAX(CASE WHEN counter_name = 'Target Server Memory (KB)'
+                        THEN cntr_value/1024 END) AS target_mb,
+                    MAX(CASE WHEN counter_name = 'Total Server Memory (KB)'
+                        THEN cntr_value/1024 END) AS total_mb
+                FROM sys.dm_os_performance_counters
+                WHERE counter_name IN ('Page life expectancy', 'Memory Grants Pending',
+                                      'Target Server Memory (KB)', 'Total Server Memory (KB)')
+            )
+            SELECT
+                @@SERVERNAME AS server_name,
+                CONVERT(VARCHAR, GETDATE(), 120) AS check_timestamp,
+
+                -- PLE Metrics
+                ple_seconds,
+                ple_seconds/60 AS ple_minutes,
+                CONVERT(VARCHAR(20),
+                    CASE
+                        WHEN ple_seconds < 300 THEN 'CRITICAL'
+                        WHEN ple_seconds < 1000 THEN 'WARNING'
+                        ELSE 'OK'
+                    END
+                ) AS ple_status,
+
+                -- Memory Grants
+                grants_pending AS memory_grants_pending,
+                CONVERT(VARCHAR(20), CASE WHEN grants_pending > 0 THEN 'CRITICAL' ELSE 'OK' END) AS grants_status,
+
+                -- Memory Allocation
+                target_mb AS target_memory_mb,
+                total_mb AS total_memory_mb,
+                target_mb - total_mb AS memory_difference_mb,
+                CONVERT(VARCHAR(20),
+                    CASE
+                        WHEN target_mb - total_mb > 1024 THEN 'UNDER_PRESSURE'
+                        WHEN target_mb - total_mb > 512 THEN 'WATCH'
+                        ELSE 'OK'
+                    END
+                ) AS memory_pressure_status,
+
+                -- Config
+                (SELECT CAST(value AS INT) FROM sys.configurations WHERE name = 'max server memory (MB)') AS max_server_memory_mb,
+                (SELECT committed_kb/1024 FROM sys.dm_os_sys_info) AS buffer_pool_committed_mb,
+                (SELECT committed_target_kb/1024 FROM sys.dm_os_sys_info) AS buffer_pool_target_mb,
+
+                -- Overall Assessment
+                CONVERT(VARCHAR(1000),
+                    CASE
+                        WHEN grants_pending > 0 THEN 'CRITICAL: Queries waiting for memory!'
+                        WHEN ple_seconds < 300 AND (target_mb - total_mb) > 1024 THEN 'CRITICAL: Low PLE and memory pressure detected'
+                        WHEN ple_seconds < 300 THEN 'WARNING: Low Page Life Expectancy'
+                        WHEN (target_mb - total_mb) > 1024 THEN 'WARNING: SQL Server wants more memory'
+                        ELSE 'OK: Memory appears healthy'
+                    END
+                ) AS overall_assessment
+            FROM memory_metrics
+            """
+        )
+
+        if results:
+            stats = MemoryStats(**results[0])
+            logger.info(
+                f"Retrieved memory stats: PLE={stats.ple_seconds}s, "
+                f"Assessment={stats.overall_assessment}"
+            )
+            return MemoryStatsResponse(
+                memory_stats=stats,
+                success=True,
+            )
+        else:
+            logger.warning("No results returned from memory stats query")
+            return MemoryStatsResponse(
+                success=False,
+                error="No results returned from query",
+            )
+
+    except Exception as e:
+        logger.error(f"Error getting memory stats: {str(e)}")
+        return MemoryStatsResponse(
             success=False,
             error=str(e),
         )
