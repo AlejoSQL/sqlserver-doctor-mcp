@@ -22,6 +22,13 @@ Ask your LLM client questions to troubleshoot and diagnose SQL Server issues:
 - "Is there CPU pressure on the server?"
 - "Show me any blocked sessions"
 
+**Memory analysis:**
+- "Does my SQL Server need more memory?"
+- "Check memory pressure"
+- "What's the Page Life Expectancy?"
+- "Analyze SQL Server memory health"
+- "Why is memory low?"
+
 ## Features
 
 Currently implemented tools:
@@ -30,6 +37,7 @@ Currently implemented tools:
 - **get_server_configurations** - Analyze critical server configurations (max memory, MAXDOP, cost threshold) with recommendations
 - **get_active_sessions** - Monitor currently executing queries with CPU usage, wait stats, and blocking information
 - **get_scheduler_stats** - Monitor CPU queue depth and detect CPU pressure with automatic interpretation
+- **get_memory_stats** - Analyze SQL Server memory health with PLE, memory grants, and pressure detection
 
 ## Prerequisites
 
@@ -139,10 +147,19 @@ Once connected, Claude can use these tools:
   - Pending I/O operations
   - CPU pressure detection (tasks waiting for CPU)
   - Automatic interpretation of results
+- **get_memory_stats()** - Returns comprehensive memory health diagnostics:
+  - Page Life Expectancy (PLE) in seconds and minutes
+  - PLE status assessment (OK, WARNING, CRITICAL)
+  - Memory grants pending (queries waiting for memory)
+  - Target vs actual memory allocation
+  - Memory pressure status (OK, WATCH, UNDER_PRESSURE)
+  - Buffer pool committed and target memory
+  - Max server memory configuration
+  - Overall memory health assessment with recommendations
 
 ## Diagnostic Skills
 
-This repository includes two diagnostic skills that provide intelligent workflows for using the MCP tools:
+This repository includes three diagnostic skills that provide intelligent workflows for using the MCP tools:
 
 ### 1. SQL Server Configuration Check (`sql-server-config-check`)
 
@@ -176,6 +193,24 @@ Analyzes current workload and resource pressure to identify performance bottlene
 4. Explains wait types in plain language
 5. Provides immediate actions, investigation steps, and preventive measures
 
+### 3. SQL Server Memory Analysis (`sql-server-memory-analysis`)
+
+Diagnoses SQL Server memory health and determines if more memory is needed.
+
+**Triggers on questions like:**
+- "Does my SQL Server need more memory?"
+- "Check memory pressure"
+- "What's the Page Life Expectancy?"
+- "Analyze SQL Server memory health"
+
+**What it does:**
+1. Analyzes memory metrics (PLE, memory grants pending, pressure status)
+2. Determines root cause (need more RAM vs need config changes)
+3. Provides decision tree for diagnosing memory issues
+4. Distinguishes between physical memory needs and configuration problems
+5. Delivers clear recommendations with expected outcomes
+6. Focuses on memory-specific tools to avoid unnecessary diagnostics
+
 ### Using the Skills
 
 **Option 1: Project-Local (Recommended)**
@@ -205,7 +240,8 @@ sqlserver-doctor-mcp/
 ├── .claude/
 │   └── skills/
 │       ├── sql-server-config-check.md      # Configuration health check skill
-│       └── sql-server-workload-analysis.md # Workload analysis skill
+│       ├── sql-server-workload-analysis.md # Workload analysis skill
+│       └── sql-server-memory-analysis.md   # Memory health analysis skill
 ├── src/
 │   └── sqlserver_doctor/
 │       ├── __init__.py
@@ -226,11 +262,11 @@ sqlserver-doctor-mcp/
 Future enhancements:
 - Additional configuration checks (tempdb, database settings)
 - Wait statistics analysis and trending
-- Index fragmentation detection
-- Query plan analysis
+- Index fragmentation detection and recommendations
+- Query plan analysis and optimization suggestions
 - Database health checks (file growth, backup status)
-- Performance counter monitoring
 - Deadlock detection and analysis
+- Transaction log usage monitoring
 - Additional diagnostic skills for specialized scenarios
 
 ## License
