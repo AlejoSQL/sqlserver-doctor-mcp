@@ -29,15 +29,35 @@ Ask your LLM client questions to troubleshoot and diagnose SQL Server issues:
 - "Analyze SQL Server memory health"
 - "Why is memory low?"
 
+**Query performance tuning:**
+- "Optimize this query" or "Tune this query"
+- "Why is this query slow?"
+- "How can I make this query faster?"
+- "Find performance issues in this SELECT statement"
+- "Analyze query execution plan"
+- "Check if my query has antipatterns"
+- "What indexes should I create for this query?"
+
 ## Features
 
 Currently implemented tools:
+
+**Server & Database Management:**
 - **get_server_version** - Get SQL Server version and instance information
 - **list_databases** - List all databases with state, recovery model, and compatibility level
+- **find_object_database** - Find which database contains a specific table or view
+
+**Performance Monitoring:**
 - **get_server_configurations** - Analyze critical server configurations (max memory, MAXDOP, cost threshold) with recommendations
 - **get_active_sessions** - Monitor currently executing queries with CPU usage, wait stats, and blocking information
 - **get_scheduler_stats** - Monitor CPU queue depth and detect CPU pressure with automatic interpretation
 - **get_memory_stats** - Analyze SQL Server memory health with PLE, memory grants, and pressure detection
+
+**Query Performance Tuning:**
+- **analyze_query_execution** - Execute queries with statistics collection and actual execution plan capture
+- **detect_query_antipatterns** - Detect SQL antipatterns (non-SARGable predicates, SELECT *, correlated subqueries)
+- **get_query_statistics_health** - Check statistics freshness and cardinality estimation quality for tables
+- **analyze_missing_indexes** - Analyze missing index recommendations and existing index usage patterns
 
 ## Prerequisites
 
@@ -156,10 +176,48 @@ Once connected, Claude can use these tools:
   - Buffer pool committed and target memory
   - Max server memory configuration
   - Overall memory health assessment with recommendations
+- **analyze_query_execution(query, database_name, include_actual_plan, max_execution_time_seconds)** - Executes a query and captures detailed performance metrics:
+  - Execution duration, CPU time, logical/physical reads
+  - Actual row count returned
+  - Query hash and plan hash for plan cache correlation
+  - Actual execution plan XML (when include_actual_plan=true)
+  - Execution plan summary with high-cost operators
+  - Wait statistics during execution
+  - Bottleneck type classification (IO_BOUND, CPU_BOUND, WAIT_BOUND, MEMORY_BOUND)
+  - WARNING: Executes the query - only use with SELECT statements
+- **detect_query_antipatterns(query, execution_plan_xml)** - Detects common SQL query antipatterns:
+  - Non-SARGable predicates (functions on columns in WHERE clause)
+  - SELECT * antipattern
+  - Leading wildcards in LIKE patterns (e.g., LIKE '%search')
+  - Implicit type conversions
+  - Correlated subqueries
+  - Scalar UDFs in SELECT list
+  - Returns severity (HIGH, MEDIUM, LOW), location, and fix recommendations
+  - Provides rewrite priority (HIGH/MEDIUM = fix query before creating indexes)
+- **get_query_statistics_health(database_name, table_names, execution_plan_xml)** - Analyzes statistics freshness and quality:
+  - Statistics age (days since last update)
+  - Modification counter (rows changed since last stats update)
+  - Sampling percentage used for statistics
+  - Cardinality estimation mismatches from execution plan
+  - Auto-update/auto-create statistics settings
+  - Severity assessment (OK, WARNING, HIGH)
+  - Provides UPDATE STATISTICS commands when needed
+- **analyze_missing_indexes(database_name, execution_plan_xml)** - Analyzes index recommendations:
+  - Missing index recommendations from SQL Server DMVs
+  - Query-specific missing index hints from execution plan
+  - Impact scoring and priority assessment
+  - Existing index usage statistics (identifies unused indexes)
+  - Index overlap detection
+  - Provides CREATE INDEX statements
+- **find_object_database(object_name)** - Locates which database contains a table or view:
+  - Searches across all accessible databases
+  - Supports formats: "TableName", "Schema.TableName", "Database.Schema.TableName"
+  - Returns database name, schema name, object name, and object type
+  - Useful for query tuning when database context is unclear
 
 ## Diagnostic Skills
 
-This repository includes three diagnostic skills that provide intelligent workflows for using the MCP tools:
+This repository includes four diagnostic skills that provide intelligent workflows for using the MCP tools:
 
 ### 1. SQL Server Configuration Check (`sql-server-config-check`)
 
@@ -211,6 +269,35 @@ Diagnoses SQL Server memory health and determines if more memory is needed.
 5. Delivers clear recommendations with expected outcomes
 6. Focuses on memory-specific tools to avoid unnecessary diagnostics
 
+### 4. SQL Server Query Tuning (`sql-server-query-tuning`)
+
+Systematically diagnoses and optimizes slow SQL Server queries through a phase-based approach that prioritizes query rewrites before index analysis.
+
+**Triggers on questions like:**
+- "Optimize this query" or "Tune this query"
+- "Why is this query slow?"
+- "How can I make this query faster?"
+- "Analyze query performance"
+- "Find performance issues in this query"
+- "Check if my query has antipatterns"
+
+**What it does:**
+1. **Phase 1 - Baseline:** Executes query with statistics collection and captures actual execution plan
+2. **Phase 2 - Antipatterns:** Detects non-SARGable predicates, SELECT *, correlated subqueries
+3. **STOP GATE:** If HIGH/MEDIUM priority antipatterns found → fix query BEFORE creating indexes
+4. **Phase 3 - Execution Plan:** Analyzes plan warnings, high-cost operators, cardinality mismatches
+5. **Phase 4 - Statistics:** Checks statistics freshness if cardinality issues detected
+6. **Phase 5 - Indexes:** Provides strategic index recommendations (lean indexes, key columns only)
+7. **Phase 6 - Summary:** Comprehensive report with baseline vs expected improvement
+
+**Key Features:**
+- Query rewrites always come before index recommendations
+- Detects and fixes non-SARGable predicates (e.g., `WHERE YEAR(col) = 2024`)
+- Recommends lean indexes (key columns only) instead of wide covering indexes
+- Evaluates columnstore suitability for analytical workloads
+- Provides ready-to-execute SQL statements (CREATE INDEX, UPDATE STATISTICS)
+- Estimates performance improvement magnitude
+
 ### Using the Skills
 
 **Option 1: Project-Local (Recommended)**
@@ -241,7 +328,8 @@ sqlserver-doctor-mcp/
 │   └── skills/
 │       ├── sql-server-config-check.md      # Configuration health check skill
 │       ├── sql-server-workload-analysis.md # Workload analysis skill
-│       └── sql-server-memory-analysis.md   # Memory health analysis skill
+│       ├── sql-server-memory-analysis.md   # Memory health analysis skill
+│       └── sql-server-query-tuning.md      # Query performance tuning skill
 ├── src/
 │   └── sqlserver_doctor/
 │       ├── __init__.py
@@ -256,18 +344,6 @@ sqlserver-doctor-mcp/
 ├── .env.example              # Example environment variables
 └── README.md
 ```
-
-## Roadmap
-
-Future enhancements:
-- Additional configuration checks (tempdb, database settings)
-- Wait statistics analysis and trending
-- Index fragmentation detection and recommendations
-- Query plan analysis and optimization suggestions
-- Database health checks (file growth, backup status)
-- Deadlock detection and analysis
-- Transaction log usage monitoring
-- Additional diagnostic skills for specialized scenarios
 
 ## License
 
