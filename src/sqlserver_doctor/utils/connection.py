@@ -79,13 +79,27 @@ class SQLServerConnection:
                 cursor = conn.cursor()
                 cursor.execute(query)
 
-                # Get column names
-                columns = [column[0] for column in cursor.description]
-
-                # Fetch all rows and convert to list of dicts
+                # Handle multiple result sets (e.g., from "USE database; SELECT ...")
+                # Loop through all result sets and return the last non-empty one
                 results = []
-                for row in cursor.fetchall():
-                    results.append(dict(zip(columns, row)))
+                while True:
+                    # Check if this result set has columns
+                    if cursor.description:
+                        columns = [column[0] for column in cursor.description]
+
+                        # Fetch all rows from this result set
+                        current_results = []
+                        for row in cursor.fetchall():
+                            current_results.append(dict(zip(columns, row)))
+
+                        # Keep the last non-empty result set
+                        if current_results:
+                            results = current_results
+                            logger.debug(f"Found result set with {len(current_results)} row(s)")
+
+                    # Move to next result set
+                    if not cursor.nextset():
+                        break
 
                 logger.info(f"Query executed successfully, returned {len(results)} row(s)")
                 return results

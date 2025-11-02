@@ -55,3 +55,5 @@ dmypy.json
 # Claude Code (ignore local settings but keep skills)
 .claude/settings.local.json
 CLAUDE.md
+.claude/skills/SKILL.md
+.mcp.json
